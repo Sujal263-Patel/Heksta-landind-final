@@ -27,21 +27,18 @@ const getServerUrl = () => {
 const sessions = new Map();
 const downloadStats = new Map();
 
+const cors = require('cors');
+
 // Middleware
 app.use(express.json());
 
 // CORS Configuration
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', CLIENT_URL);
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
-  res.header('Access-Control-Allow-Credentials', 'true');
-
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(200);
-  }
-  next();
-});
+app.use(cors({
+  origin: CLIENT_URL || '*',
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Origin', 'X-Requested-With', 'Content-Type', 'Accept']
+}));
 
 // Get local IP
 const getLocalIP = () => {
