@@ -6,6 +6,7 @@ const fs = require('fs');
 const ip = require('ip');
 const { v4: uuidv4 } = require('uuid');
 const QRCode = require('qrcode');
+const multer = require('multer');
 require('dotenv').config(); // Load environment variables
 
 const app = express();
@@ -16,11 +17,16 @@ const PORT = process.env.PORT || 5000;
 const CLIENT_URL = process.env.CLIENT_URL;
 
 // Get server URL
+let cachedServerUrl = null;
 const getServerUrl = () => {
+  if (cachedServerUrl) return cachedServerUrl;
+
   if (process.env.NODE_ENV === 'production') {
-    return 'https://heksta-backend.onrender.com';
+    cachedServerUrl = 'https://heksta-backend.onrender.com';
+  } else {
+    cachedServerUrl = `http://${getLocalIP()}:${PORT}`;
   }
-  return `http://${getLocalIP()}:${PORT}`;
+  return cachedServerUrl;
 };
 
 // Store active sessions
@@ -75,23 +81,10 @@ app.post('/api/create-session', (req, res) => {
     console.log(`Created session ${sessionId} for ${senderName}`);
     console.log(`Join link: ${joinLink}`);
 
-    QRCode.toDataURL(joinLink, (err, qrCode) => {
-      if (err) {
-        console.error('QR Code generation error:', err);
-        return res.json({
-          sessionId,
-          joinLink,
-          serverUrl: getServerUrl(),
-          qrCode: null
-        });
-      }
-
-      res.json({
-        sessionId,
-        joinLink,
-        qrCode,
-        serverUrl: getServerUrl()
-      });
+    res.json({
+      sessionId,
+      joinLink,
+      serverUrl: getServerUrl()
     });
   } catch (error) {
     console.error('Session creation error:', error);
@@ -112,22 +105,27 @@ app.post('/api/upload/:sessionId', (req, res) => {
     return res.status(400).json({ error: 'Session is not active' });
   }
 
-  // Ensure upload directory exists
-  const uploadDir = path.join(__dirname, 'uploads', sessionId);
-  if (!fs.existsSync(uploadDir)) {
-    fs.mkdirSync(uploadDir, { recursive: true });
-  }
-
   // Handle file upload
-  const multer = require('multer');
   const upload = multer({
-    dest: uploadDir,
+    storage: multer.diskStorage({
+      destination: (req, file, cb) => {
+        const sid = req.params.sessionId;
+        const dir = path.join(__dirname, 'uploads', sid);
+        if (!fs.existsSync(dir)) {
+          fs.mkdirSync(dir, { recursive: true });
+        }
+        cb(null, dir);
+      },
+      filename: (req, file, cb) => {
+        cb(null, `${Date.now()}-${file.originalname}`);
+      }
+    }),
     limits: {
       fileSize: 10 * 1024 * 1024 * 1024 // 10GB limit
     }
-  });
+  }).array('files');
 
-  upload.array('files')(req, res, (err) => {
+  upload(req, res, (err) => {
     if (err) {
       console.error('Upload error:', err);
       return res.status(500).json({ error: 'Upload failed: ' + err.message });
