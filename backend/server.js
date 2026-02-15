@@ -466,6 +466,11 @@ app.use('/api/*', (req, res) => {
   res.status(404).json({ error: 'API endpoint not found' });
 });
 
+// Health check endpoint for UptimeRobot
+app.get("/health", (req, res) => {
+  res.status(200).send("OK");
+});
+
 // Root route to confirm backend status - JSON RESPONSE ONLY
 app.get('/', (req, res) => {
   res.json({ status: 'Heksta backend running 🚀' });
