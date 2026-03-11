@@ -17,7 +17,9 @@ const server = http.createServer(app);
 server.timeout = 0; // Disable timeout or set very high
 server.keepAliveTimeout = 60000;
 
-const wss = new WebSocket.Server({ server });
+// Initialize WebSocket Servers with noServer: true to handle routing manually
+const wss = new WebSocket.Server({ noServer: true });
+const whisperWss = new WebSocket.Server({ noServer: true });
 
 const PORT = process.env.PORT || 5000;
 const CLIENT_URL = process.env.CLIENT_URL;
@@ -38,6 +40,8 @@ const getServerUrl = () => {
 // Store active sessions
 const sessions = new Map();
 const downloadStats = new Map();
+const whisperUsers = new Map(); // { clientId: { name, ws, joinedAt } }
+const whisperFiles = new Map(); // { fileId: { path, originalName, mimetype, uploadedBy, uploadedAt } }
 
 const cors = require('cors');
 
@@ -397,7 +401,78 @@ app.post('/api/session/:sessionId/close', (req, res) => {
   res.json({ message: 'Session closed successfully' });
 });
 
-// WebSocket connection handling
+// ── WHISPER MODE FILE UPLOAD ──
+const whisperUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      const dir = path.join(__dirname, 'uploads', '_whisper');
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      cb(null, dir);
+    },
+    filename: (req, file, cb) => cb(null, `${uuidv4()}-${Date.now()}${path.extname(file.originalname)}`)
+  }),
+  limits: { fileSize: 100 * 1024 * 1024 } // 100MB per whisper file
+}).single('file');
+
+app.post('/api/whisper/upload', (req, res) => {
+  whisperUpload(req, res, (err) => {
+    if (err) return res.status(500).json({ error: 'Upload failed: ' + err.message });
+    if (!req.file) return res.status(400).json({ error: 'No file provided' });
+
+    const fileId = uuidv4();
+    whisperFiles.set(fileId, {
+      path: req.file.path,
+      originalName: req.file.originalname,
+      mimetype: req.file.mimetype,
+      size: req.file.size,
+      uploadedBy: req.body.senderId || 'unknown',
+      uploadedAt: Date.now()
+    });
+
+    // Auto-delete after 24 hours
+    setTimeout(() => {
+      const f = whisperFiles.get(fileId);
+      if (f && fs.existsSync(f.path)) fs.unlinkSync(f.path);
+      whisperFiles.delete(fileId);
+    }, 24 * 60 * 60 * 1000);
+
+    console.log(`Whisper file uploaded: ${req.file.originalname} (${fileId})`);
+    res.json({ fileId, fileName: req.file.originalname, fileSize: req.file.size, mimeType: req.file.mimetype });
+  });
+});
+
+// Serve a whisper file
+app.get('/api/whisper/file/:fileId', (req, res) => {
+  const file = whisperFiles.get(req.params.fileId);
+  if (!file || !fs.existsSync(file.path)) return res.status(404).json({ error: 'File not found' });
+
+  res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(file.originalName)}"`);
+  res.setHeader('Content-Type', file.mimetype || 'application/octet-stream');
+  res.setHeader('Content-Length', file.size);
+  fs.createReadStream(file.path).pipe(res);
+});
+
+
+server.on('upgrade', (request, socket, head) => {
+  const url = new URL(request.url, `http://${request.headers.host}`);
+  const pathname = url.pathname;
+
+  if (pathname === '/whisper') {
+    whisperWss.handleUpgrade(request, socket, head, (ws) => {
+      whisperWss.emit('connection', ws, request);
+    });
+  } else if (pathname === '/') {
+    // Main file-sharing websocket
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      wss.emit('connection', ws, request);
+    });
+  } else {
+    // If it doesn't match our routes, destroy the socket to prevent hanging
+    socket.destroy();
+  }
+});
+
+// Main File Sharing WebSocket connection handling
 wss.on('connection', (ws, req) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const sessionId = url.searchParams.get('sessionId');
@@ -452,6 +527,144 @@ wss.on('connection', (ws, req) => {
     console.error('WebSocket error:', error);
   });
 });
+
+
+// Whisper Mode WebSocket connection handling
+// Heartbeat: every 15s ping all clients; remove any that don't pong back
+const WHISPER_HEARTBEAT_INTERVAL = 15000;
+
+const whisperHeartbeat = setInterval(() => {
+  whisperWss.clients.forEach(wsClient => {
+    if (wsClient.isAlive === false) {
+      // Client didn't respond to last ping — terminate it
+      wsClient.terminate();
+      return;
+    }
+    wsClient.isAlive = false;
+    wsClient.ping();
+  });
+}, WHISPER_HEARTBEAT_INTERVAL);
+
+whisperWss.on('close', () => clearInterval(whisperHeartbeat));
+
+whisperWss.on('connection', (ws, req) => {
+  const clientId = uuidv4();
+  ws.clientId = clientId;
+  ws.isAlive = true; // Mark alive on connect
+
+  // Respond to heartbeat pings
+  ws.on('pong', () => { ws.isAlive = true; });
+
+  ws.on('message', (data) => {
+    try {
+      const message = JSON.parse(data);
+
+      switch (message.type) {
+        case 'join': {
+          const userName = (message.name || 'Anonymous').trim().slice(0, 30);
+          whisperUsers.delete(clientId);
+          whisperUsers.set(clientId, {
+            id: clientId,
+            name: userName,
+            ws,
+            joinedAt: Date.now()
+          });
+          // Send clientId back to the client
+          ws.send(JSON.stringify({ type: 'connected', clientId }));
+          console.log(`Whisper: User "${userName}" (${clientId}) joined. Total: ${whisperUsers.size}`);
+          broadcastWhisperUserList();
+          break;
+        }
+        case 'private_message': {
+          const { to, content } = message;
+          const targetUser = whisperUsers.get(to);
+          if (targetUser && targetUser.ws.readyState === WebSocket.OPEN) {
+            targetUser.ws.send(JSON.stringify({
+              type: 'private_message',
+              from: clientId,
+              fromName: whisperUsers.get(clientId)?.name || 'Unknown',
+              content,
+              timestamp: Date.now()
+            }));
+          }
+          break;
+        }
+        case 'file_message': {
+          const { to, fileId, fileName, fileSize, mimeType } = message;
+          const targetUser = whisperUsers.get(to);
+          if (targetUser && targetUser.ws.readyState === WebSocket.OPEN) {
+            targetUser.ws.send(JSON.stringify({
+              type: 'file_message',
+              from: clientId,
+              fromName: whisperUsers.get(clientId)?.name || 'Unknown',
+              fileId,
+              fileName,
+              fileSize,
+              mimeType,
+              timestamp: Date.now()
+            }));
+          }
+          break;
+        }
+
+      } // end switch
+    } catch (err) {
+      console.error('Whisper message error:', err);
+    }
+  });
+
+
+  ws.on('close', () => {
+    if (whisperUsers.has(clientId)) {
+      const user = whisperUsers.get(clientId);
+      console.log(`Whisper: User "${user.name}" (${clientId}) disconnected. Total: ${whisperUsers.size - 1}`);
+      whisperUsers.delete(clientId);
+      broadcastWhisperUserList();
+
+      // Ephemeral cleanup: delete all files uploaded by this user
+      for (const [fileId, fileData] of whisperFiles.entries()) {
+        if (fileData.uploadedBy === clientId) {
+          if (fs.existsSync(fileData.path)) fs.unlinkSync(fileData.path);
+          whisperFiles.delete(fileId);
+        }
+      }
+    }
+  });
+
+  ws.on('error', (err) => {
+    console.error('Whisper WS error:', err.message);
+    if (whisperUsers.has(clientId)) {
+      whisperUsers.delete(clientId);
+      broadcastWhisperUserList();
+      for (const [fileId, fileData] of whisperFiles.entries()) {
+        if (fileData.uploadedBy === clientId) {
+          if (fs.existsSync(fileData.path)) fs.unlinkSync(fileData.path);
+          whisperFiles.delete(fileId);
+        }
+      }
+    }
+  });
+
+});
+
+function broadcastWhisperUserList() {
+  const userList = Array.from(whisperUsers.values()).map(u => ({
+    id: u.id,
+    name: u.name,
+    joinedAt: u.joinedAt
+  }));
+
+  const message = JSON.stringify({
+    type: 'user_list',
+    users: userList
+  });
+
+  whisperUsers.forEach(user => {
+    if (user.ws.readyState === WebSocket.OPEN) {
+      user.ws.send(message);
+    }
+  });
+}
 
 // Broadcast message to all clients in a session
 function broadcastToSession(sessionId, message) {
