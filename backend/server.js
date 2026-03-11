@@ -7,10 +7,16 @@ const ip = require('ip');
 const { v4: uuidv4 } = require('uuid');
 const QRCode = require('qrcode');
 const multer = require('multer');
+const archiver = require('archiver');
 require('dotenv').config(); // Load environment variables
 
 const app = express();
 const server = http.createServer(app);
+
+// Increase timeout for large file uploads/downloads (10GB can take a while)
+server.timeout = 0; // Disable timeout or set very high
+server.keepAliveTimeout = 60000;
+
 const wss = new WebSocket.Server({ server });
 
 const PORT = process.env.PORT || 5000;
@@ -121,7 +127,8 @@ app.post('/api/upload/:sessionId', (req, res) => {
       }
     }),
     limits: {
-      fileSize: 10 * 1024 * 1024 * 1024 // 10GB limit
+      fileSize: 10 * 1024 * 1024 * 1024, // 10GB limit
+      fieldSize: 100 * 1024 * 1024 // 100MB for non-file fields
     }
   }).array('files');
 
@@ -307,6 +314,61 @@ app.get('/api/download/:sessionId/:fileId', (req, res) => {
     fileStream.pipe(res);
     fileStream.on('error', handleError);
   }
+});
+
+// Download all files as ZIP
+app.get('/api/download-all/:sessionId', (req, res) => {
+  const { sessionId } = req.params;
+  const session = sessions.get(sessionId);
+
+  if (!session) {
+    console.log(`Download all failed: Session ${sessionId} not found`);
+    return res.status(404).json({ error: 'Session not found' });
+  }
+
+  if (!session.files || session.files.length === 0) {
+    console.log(`Download all failed: No files in session ${sessionId}`);
+    return res.status(400).json({ error: 'No files to download' });
+  }
+
+  console.log(`Starting download all for session ${sessionId} (${session.files.length} files)`);
+
+  const archive = archiver('zip', {
+    zlib: { level: 5 } // Balanced compression
+  });
+
+  // Set response headers
+  res.attachment(`${session.senderName || 'heksta'}-all-files.zip`);
+
+  archive.on('error', (err) => {
+    console.error(`Archive error for session ${sessionId}:`, err);
+    if (!res.headersSent) {
+      res.status(500).send({ error: 'Failed to create zip archive: ' + err.message });
+    }
+  });
+
+  archive.on('warning', (err) => {
+    if (err.code === 'ENOENT') {
+      console.warn(`Archive warning for session ${sessionId}:`, err);
+    } else {
+      console.error(`Archive error for session ${sessionId}:`, err);
+      throw err;
+    }
+  });
+
+  // Stream archive to response
+  archive.pipe(res);
+
+  // Add each file to the archive
+  session.files.forEach(file => {
+    if (fs.existsSync(file.path)) {
+      archive.file(file.path, { name: file.originalName });
+    } else {
+      console.warn(`File not found for zip: ${file.path}`);
+    }
+  });
+
+  archive.finalize();
 });
 
 // Close session
