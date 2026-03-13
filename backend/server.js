@@ -88,8 +88,8 @@ app.post('/api/create-session', (req, res) => {
     const frontendBaseUrl = process.env.CLIENT_URL || 'http://localhost:5173';
     const joinLink = `${frontendBaseUrl}/join/${sessionId}`;
 
-    console.log(`Created session ${sessionId} for ${senderName}`);
-    console.log(`Join link: ${joinLink}`);
+    console.log(`Created secure session ID: ${sessionId}`);
+    console.log(`Session join link generated [HIDDEN FOR PRIVACY]`);
 
     res.json({
       sessionId,
@@ -127,7 +127,8 @@ app.post('/api/upload/:sessionId', (req, res) => {
         cb(null, dir);
       },
       filename: (req, file, cb) => {
-        cb(null, `${Date.now()}-${file.originalname}`);
+        // Obfuscate filenames on disk for user privacy
+        cb(null, `${Date.now()}-${uuidv4()}${path.extname(file.originalname)}`);
       }
     }),
     limits: {
@@ -258,7 +259,7 @@ app.get('/api/download/:sessionId/:fileId', (req, res) => {
 
   // Check if file exists
   if (!fs.existsSync(filePath)) {
-    console.log(`Download failed: File ${filePath} not found on server`);
+    console.log(`Download failed: File ID ${fileId} not found on server`);
     trackDownloadFailure(sessionId, fileId, 'File not found on server');
     return res.status(404).json({ error: 'File not found on server' });
   }
@@ -271,7 +272,7 @@ app.get('/api/download/:sessionId/:fileId', (req, res) => {
   const fileSize = stat.size;
   const range = req.headers.range;
 
-  console.log(`Starting download: ${file.originalName} (${fileSize} bytes) for client ${clientId}`);
+  console.log(`Starting download: File ID ${fileId} (${fileSize} bytes) for client ID ${clientId}`);
 
   // Handle cleanup on response finish
   const cleanup = () => {
@@ -368,7 +369,7 @@ app.get('/api/download-all/:sessionId', (req, res) => {
     if (fs.existsSync(file.path)) {
       archive.file(file.path, { name: file.originalName });
     } else {
-      console.warn(`File not found for zip: ${file.path}`);
+      console.warn(`File not found for zip: File ID ${file.id}`);
     }
   });
 
@@ -436,7 +437,7 @@ app.post('/api/whisper/upload', (req, res) => {
       whisperFiles.delete(fileId);
     }, 24 * 60 * 60 * 1000);
 
-    console.log(`Whisper file uploaded: ${req.file.originalname} (${fileId})`);
+    console.log(`Whisper file uploaded: File ID ${fileId} (${req.file.size} bytes)`);
     res.json({ fileId, fileName: req.file.originalname, fileSize: req.file.size, mimeType: req.file.mimetype });
   });
 });
@@ -571,7 +572,7 @@ whisperWss.on('connection', (ws, req) => {
           });
           // Send clientId back to the client
           ws.send(JSON.stringify({ type: 'connected', clientId }));
-          console.log(`Whisper: User "${userName}" (${clientId}) joined. Total: ${whisperUsers.size}`);
+          console.log(`Whisper: User ID (${clientId}) joined. Total: ${whisperUsers.size}`);
           broadcastWhisperUserList();
           break;
         }
@@ -617,7 +618,7 @@ whisperWss.on('connection', (ws, req) => {
   ws.on('close', () => {
     if (whisperUsers.has(clientId)) {
       const user = whisperUsers.get(clientId);
-      console.log(`Whisper: User "${user.name}" (${clientId}) disconnected. Total: ${whisperUsers.size - 1}`);
+      console.log(`Whisper: User ID (${clientId}) disconnected. Total: ${whisperUsers.size - 1}`);
       whisperUsers.delete(clientId);
       broadcastWhisperUserList();
 
