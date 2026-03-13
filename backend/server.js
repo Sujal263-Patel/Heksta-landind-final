@@ -150,7 +150,7 @@ app.post('/api/upload/:sessionId', (req, res) => {
 
     const files = req.files.map(file => ({
       id: uuidv4(),
-      originalName: file.originalname,
+      originalName: file.originalname,  // multer captures the 3rd arg of formData.append here
       filename: file.filename,
       path: file.path,
       size: file.size,
@@ -427,6 +427,7 @@ app.post('/api/whisper/upload', (req, res) => {
       mimetype: req.file.mimetype,
       size: req.file.size,
       uploadedBy: req.body.senderId || 'unknown',
+      roomId: req.body.roomId || 'global',
       uploadedAt: Date.now()
     });
 
@@ -563,17 +564,19 @@ whisperWss.on('connection', (ws, req) => {
       switch (message.type) {
         case 'join': {
           const userName = (message.name || 'Anonymous').trim().slice(0, 30);
+          const roomId = message.roomId || 'global';
           whisperUsers.delete(clientId);
           whisperUsers.set(clientId, {
             id: clientId,
             name: userName,
+            roomId,
             ws,
             joinedAt: Date.now()
           });
           // Send clientId back to the client
           ws.send(JSON.stringify({ type: 'connected', clientId }));
-          console.log(`Whisper: User ID (${clientId}) joined. Total: ${whisperUsers.size}`);
-          broadcastWhisperUserList();
+          console.log(`Whisper: User ID (${clientId}) joined room ${roomId}. Total: ${whisperUsers.size}`);
+          broadcastWhisperUserList(roomId);
           break;
         }
         case 'private_message': {
@@ -618,9 +621,10 @@ whisperWss.on('connection', (ws, req) => {
   ws.on('close', () => {
     if (whisperUsers.has(clientId)) {
       const user = whisperUsers.get(clientId);
-      console.log(`Whisper: User ID (${clientId}) disconnected. Total: ${whisperUsers.size - 1}`);
+      const roomId = user.roomId;
+      console.log(`Whisper: User ID (${clientId}) disconnected from room ${roomId}. Total: ${whisperUsers.size - 1}`);
       whisperUsers.delete(clientId);
-      broadcastWhisperUserList();
+      broadcastWhisperUserList(roomId);
 
       // Ephemeral cleanup: delete all files uploaded by this user
       for (const [fileId, fileData] of whisperFiles.entries()) {
@@ -635,8 +639,10 @@ whisperWss.on('connection', (ws, req) => {
   ws.on('error', (err) => {
     console.error('Whisper WS error:', err.message);
     if (whisperUsers.has(clientId)) {
+      const user = whisperUsers.get(clientId);
+      const roomId = user.roomId;
       whisperUsers.delete(clientId);
-      broadcastWhisperUserList();
+      broadcastWhisperUserList(roomId);
       for (const [fileId, fileData] of whisperFiles.entries()) {
         if (fileData.uploadedBy === clientId) {
           if (fs.existsSync(fileData.path)) fs.unlinkSync(fileData.path);
@@ -648,8 +654,9 @@ whisperWss.on('connection', (ws, req) => {
 
 });
 
-function broadcastWhisperUserList() {
-  const userList = Array.from(whisperUsers.values()).map(u => ({
+function broadcastWhisperUserList(roomId) {
+  const usersInRoom = Array.from(whisperUsers.values()).filter(u => u.roomId === roomId);
+  const userList = usersInRoom.map(u => ({
     id: u.id,
     name: u.name,
     joinedAt: u.joinedAt
@@ -660,7 +667,7 @@ function broadcastWhisperUserList() {
     users: userList
   });
 
-  whisperUsers.forEach(user => {
+  usersInRoom.forEach(user => {
     if (user.ws.readyState === WebSocket.OPEN) {
       user.ws.send(message);
     }
