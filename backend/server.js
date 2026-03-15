@@ -744,15 +744,47 @@ function trackDownloadFailure(sessionId, fileId, error) {
   }
 }
 
-// Global API Catch-all for 404
-app.use('/api/*', (req, res) => {
-  res.status(404).json({ error: 'API endpoint not found' });
-});
+// Serve static files from the React app
+const frontendPath = path.join(__dirname, '../frontend/dist');
+if (fs.existsSync(frontendPath)) {
+  console.log(`Serving frontend from: ${frontendPath}`);
+  app.use(express.static(frontendPath, {
+    setHeaders: (res, filePath) => {
+      // Set long-term cache for assets (JS, CSS, images) since they have hashes
+      if (filePath.includes('assets')) {
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      } else if (filePath.endsWith('.html')) {
+        // DO NOT CACHE index.html to ensure users get updates
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
+      }
+    }
+  }));
 
-// Root route to confirm backend status - JSON RESPONSE ONLY
-app.get('/', (req, res) => {
-  res.json({ status: 'Heksta backend running 🚀' });
-});
+  // Handle SPA routing - serve index.html for all non-API routes
+  app.get('*', (req, res, next) => {
+    // Skip if it is an API request
+    if (req.path.startsWith('/api/')) {
+      return next();
+    }
+    res.sendFile(path.join(frontendPath, 'index.html'), (err) => {
+      if (err) {
+        // If index.html is missing, just send the backend status as fallback
+        if (!res.headersSent) {
+          res.json({ status: 'Heksta backend running 🚀', note: 'Frontend build not found' });
+        }
+      }
+    });
+  });
+} else {
+  console.warn(`WARNING: Frontend path not found at ${frontendPath}. Frontend will not be served.`);
+  // Fallback root route if frontend is not available
+  app.get('/', (req, res) => {
+    res.json({ status: 'Heksta backend running 🚀', note: 'Static frontend not found' });
+  });
+}
+
 
 // Start server
 server.listen(PORT, () => {
