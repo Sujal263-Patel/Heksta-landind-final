@@ -31,7 +31,7 @@ const getServerUrl = () => {
   if (cachedServerUrl) return cachedServerUrl;
 
   if (process.env.NODE_ENV === 'production') {
-    cachedServerUrl = 'https://heksta-backend.onrender.com';
+    cachedServerUrl = 'https://heksta.in';
   } else {
     cachedServerUrl = `http://${getLocalIP()}:${PORT}`;
   }
@@ -89,7 +89,7 @@ app.post('/api/create-session', (req, res) => {
     const localIp = getLocalIP();
     const isProd = process.env.NODE_ENV === 'production';
 
-    const globalBase = isProd ? 'https://heksta-landind-final.onrender.com' : `http://${localIp}:${PORT}`;
+    const globalBase = isProd ? 'https://heksta.in' : `http://${localIp}:${PORT}`;
     const localBase = `http://${localIp}:${PORT}`;
 
     res.json({
@@ -785,7 +785,7 @@ if (fs.existsSync(frontendPath)) {
   app.use(express.static(frontendPath, {
     setHeaders: (res, filePath) => {
       // Set long-term cache for assets (JS, CSS, images) since they have hashes
-      if (filePath.includes('assets')) {
+      if (filePath.includes('assets') || filePath.match(/\.(js|css|woff2?|png|jpg|jpeg|gif|svg|ico|json)$/)) {
         res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
       } else if (filePath.endsWith('.html')) {
         // DO NOT CACHE index.html to ensure users get updates
@@ -798,8 +798,8 @@ if (fs.existsSync(frontendPath)) {
 
   // Handle SPA routing - serve index.html for all non-API routes
   app.get('*', (req, res, next) => {
-    // Skip if it is an API request
-    if (req.path.startsWith('/api/')) {
+    // Skip if it is an API request or static asset that was missed
+    if (req.path.startsWith('/api/') || req.path.includes('.')) {
       return next();
     }
     res.sendFile(path.join(frontendPath, 'index.html'), (err) => {
