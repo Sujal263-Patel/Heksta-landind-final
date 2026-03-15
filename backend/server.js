@@ -42,6 +42,8 @@ const sessions = new Map();
 const downloadStats = new Map();
 const whisperUsers = new Map(); // { clientId: { name, ws, joinedAt } }
 const whisperFiles = new Map(); // { fileId: { path, originalName, mimetype, uploadedBy, uploadedAt } }
+const chunkStore = new Map(); // { fileId: { chunks: [], totalChunks, fileName, mimetype } }
+const whisperGroups = new Map(); // { groupId: { name, creatorId, members: [ids], createdAt } }
 
 const cors = require('cors');
 
@@ -183,6 +185,107 @@ app.post('/api/upload/:sessionId', (req, res) => {
       }))
     });
   });
+});
+
+// ── CHUNKED UPLOAD ENDPOINTS ──
+const chunkUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      const { sessionId, fileId } = req.params;
+      const dir = path.join(__dirname, 'uploads', sessionId, 'chunks', fileId);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      cb(null, dir);
+    },
+    filename: (req, file, cb) => {
+      cb(null, `chunk-${req.body.chunkNumber}`);
+    }
+  })
+}).single('chunk');
+
+app.post('/api/upload-chunk/:sessionId/:fileId', (req, res) => {
+  chunkUpload(req, res, (err) => {
+    if (err) return res.status(500).json({ error: 'Chunk upload failed: ' + err.message });
+
+    const { sessionId, fileId } = req.params;
+    const { chunkNumber, totalChunks, fileName, mimeType } = req.body;
+
+    res.json({ success: true, chunkNumber });
+  });
+});
+
+app.post('/api/complete-upload/:sessionId/:fileId', async (req, res) => {
+  const { sessionId, fileId } = req.params;
+  const { fileName, totalChunks, mimeType } = req.body;
+  const session = sessions.get(sessionId);
+
+  if (!session) return res.status(404).json({ error: 'Session not found' });
+
+  const chunksDir = path.join(__dirname, 'uploads', sessionId, 'chunks', fileId);
+  const finalFileName = `${Date.now()}-${uuidv4()}${path.extname(fileName)}`;
+  const finalPath = path.join(__dirname, 'uploads', sessionId, finalFileName);
+  const finalDir = path.dirname(finalPath);
+
+  if (!fs.existsSync(finalDir)) fs.mkdirSync(finalDir, { recursive: true });
+
+  try {
+    const writeStream = fs.createWriteStream(finalPath);
+
+    for (let i = 0; i < totalChunks; i++) {
+      const chunkPath = path.join(chunksDir, `chunk-${i}`);
+      if (!fs.existsSync(chunkPath)) {
+        throw new Error(`Missing chunk ${i}`);
+      }
+      const chunkBuffer = fs.readFileSync(chunkPath);
+      writeStream.write(chunkBuffer);
+      // Clean up chunk
+      fs.unlinkSync(chunkPath);
+    }
+
+    writeStream.end();
+
+    // Clean up chunks directory
+    if (fs.existsSync(chunksDir)) {
+      setTimeout(() => {
+        try { if (fs.existsSync(chunksDir)) fs.rmSync(chunksDir, { recursive: true, force: true }); } catch (e) { }
+      }, 1000);
+    }
+
+    const file = {
+      id: uuidv4(),
+      originalName: fileName,
+      filename: finalFileName,
+      path: finalPath,
+      size: fs.statSync(finalPath).size,
+      mimetype: mimeType || 'application/octet-stream',
+      uploadedAt: Date.now()
+    };
+
+    session.files.push(file);
+    sessions.set(sessionId, session);
+
+    // Notify connected clients
+    broadcastToSession(sessionId, {
+      type: 'files_updated',
+      files: session.files.map(f => ({
+        id: f.id,
+        name: f.originalName,
+        size: f.size,
+        type: f.mimetype
+      }))
+    });
+
+    res.json({
+      message: 'File assembled successfully',
+      file: {
+        id: file.id,
+        name: file.originalName,
+        size: file.size
+      }
+    });
+  } catch (err) {
+    console.error('Assembly error:', err);
+    res.status(500).json({ error: 'File assembly failed: ' + err.message });
+  }
 });
 
 // Get session info
@@ -454,6 +557,80 @@ app.get('/api/whisper/file/:fileId', (req, res) => {
   fs.createReadStream(file.path).pipe(res);
 });
 
+// ── WHISPER CHUNKED UPLOAD ──
+app.post('/api/whisper/upload-chunk/:fileId', (req, res) => {
+  const dir = path.join(__dirname, 'uploads', '_whisper', 'chunks', req.params.fileId);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+  const chunkUpload = multer({
+    storage: multer.diskStorage({
+      destination: dir,
+      filename: (req, file, cb) => cb(null, `chunk-${req.body.chunkNumber}`)
+    })
+  }).single('chunk');
+
+  chunkUpload(req, res, (err) => {
+    if (err) return res.status(500).json({ error: 'Chunk upload failed: ' + err.message });
+    res.json({ success: true, chunkNumber: req.body.chunkNumber });
+  });
+});
+
+app.post('/api/whisper/complete-upload/:fileId', async (req, res) => {
+  const { fileId } = req.params;
+  const { fileName, totalChunks, mimeType, senderId, roomId } = req.body;
+
+  const chunksDir = path.join(__dirname, 'uploads', '_whisper', 'chunks', fileId);
+  const finalFileName = `${uuidv4()}-${Date.now()}${path.extname(fileName)}`;
+  const finalPath = path.join(__dirname, 'uploads', '_whisper', finalFileName);
+
+  const finalDir = path.dirname(finalPath);
+  if (!fs.existsSync(finalDir)) fs.mkdirSync(finalDir, { recursive: true });
+
+  try {
+    const writeStream = fs.createWriteStream(finalPath);
+
+    for (let i = 0; i < totalChunks; i++) {
+      const chunkPath = path.join(chunksDir, `chunk-${i}`);
+      if (!fs.existsSync(chunkPath)) throw new Error(`Missing chunk ${i}`);
+      writeStream.write(fs.readFileSync(chunkPath));
+      fs.unlinkSync(chunkPath);
+    }
+
+    writeStream.end();
+
+    // Cleanup chunks dir
+    if (fs.existsSync(chunksDir)) {
+      setTimeout(() => {
+        try { if (fs.existsSync(chunksDir)) fs.rmSync(chunksDir, { recursive: true, force: true }); } catch (e) { }
+      }, 1000);
+    }
+
+    const file = {
+      path: finalPath,
+      originalName: fileName,
+      mimetype: mimeType,
+      size: fs.statSync(finalPath).size,
+      uploadedBy: senderId,
+      roomId: roomId,
+      uploadedAt: Date.now()
+    };
+
+    whisperFiles.set(fileId, file);
+
+    // Auto-delete after 24 hours
+    setTimeout(() => {
+      const f = whisperFiles.get(fileId);
+      if (f && fs.existsSync(f.path)) fs.unlinkSync(f.path);
+      whisperFiles.delete(fileId);
+    }, 24 * 60 * 60 * 1000);
+
+    res.json({ fileId, fileName, fileSize: file.size, mimeType });
+  } catch (err) {
+    console.error('Whisper Assembly error:', err);
+    res.status(500).json({ error: 'Whisper file assembly failed: ' + err.message });
+  }
+});
+
 
 server.on('upgrade', (request, socket, head) => {
   const url = new URL(request.url, `http://${request.headers.host}`);
@@ -607,6 +784,85 @@ whisperWss.on('connection', (ws, req) => {
               mimeType,
               timestamp: Date.now()
             }));
+          }
+          break;
+        }
+        case 'create_group': {
+          const { name, members } = message; // members is array of clientIds
+          const groupId = 'group-' + uuidv4().substring(0, 8);
+          // Add creator to members if not already there
+          const finalMembers = members.includes(clientId) ? members : [...members, clientId];
+
+          whisperGroups.set(groupId, {
+            id: groupId,
+            name: name || 'New Group',
+            creatorId: clientId,
+            members: finalMembers,
+            roomId: whisperUsers.get(clientId)?.roomId || 'global',
+            createdAt: Date.now()
+          });
+
+          // Notify all online members about the new group
+          finalMembers.forEach(mid => {
+            const user = whisperUsers.get(mid);
+            if (user && user.ws.readyState === WebSocket.OPEN) {
+              user.ws.send(JSON.stringify({
+                type: 'group_created',
+                groupId,
+                name: name || 'New Group',
+                members: finalMembers.map(id => ({ id, name: whisperUsers.get(id)?.name || 'Former Ghost' }))
+              }));
+            }
+          });
+          break;
+        }
+        case 'group_message': {
+          const { groupId, content, kind, fileId, fileName, fileSize, mimeType } = message;
+          const group = whisperGroups.get(groupId);
+          if (group) {
+            // Broadcast to all members currently online
+            group.members.forEach(mid => {
+              const user = whisperUsers.get(mid);
+              if (user && user.ws.readyState === WebSocket.OPEN) {
+                user.ws.send(JSON.stringify({
+                  type: 'group_message',
+                  groupId,
+                  from: clientId,
+                  fromName: whisperUsers.get(clientId)?.name || 'Unknown',
+                  content,
+                  kind: kind || 'text',
+                  fileId,
+                  fileName,
+                  fileSize,
+                  mimeType,
+                  timestamp: Date.now()
+                }));
+              }
+            });
+          }
+          break;
+        }
+        case 'add_group_member': {
+          const { groupId, newMemberId } = message;
+          const group = whisperGroups.get(groupId);
+          if (group && group.members.includes(clientId)) {
+            if (!group.members.includes(newMemberId)) {
+              group.members.push(newMemberId);
+              whisperGroups.set(groupId, group);
+
+              // Notify everyone in the group (old and new)
+              group.members.forEach(mid => {
+                const user = whisperUsers.get(mid);
+                if (user && user.ws.readyState === WebSocket.OPEN) {
+                  user.ws.send(JSON.stringify({
+                    type: 'group_updated',
+                    groupId,
+                    name: group.name,
+                    members: group.members.map(id => ({ id, name: whisperUsers.get(id)?.name || 'Former Ghost' }))
+                  }));
+                }
+              });
+            }
           }
           break;
         }
