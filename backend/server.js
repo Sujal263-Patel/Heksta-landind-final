@@ -518,6 +518,27 @@ wss.on('connection', (ws, req) => {
     connectedClients: session.connectedClients
   });
 
+  ws.on('message', (data) => {
+    try {
+      const message = JSON.parse(data);
+      if (message.type === 'signal') {
+        // Relay signaling data to a specific client or the sender
+        const { to, signalData, fromClientId } = message;
+        wss.clients.forEach(client => {
+          if (client.clientId === to && client.readyState === WebSocket.OPEN) {
+            client.send(JSON.stringify({
+              type: 'signal',
+              from: fromClientId || clientId,
+              signalData
+            }));
+          }
+        });
+      }
+    } catch (e) {
+      console.error('WS Message error:', e);
+    }
+  });
+
   ws.on('close', () => {
     const session = sessions.get(sessionId);
     if (session) {
