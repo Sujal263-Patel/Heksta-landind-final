@@ -13,9 +13,10 @@ require('dotenv').config(); // Load environment variables
 const app = express();
 const server = http.createServer(app);
 
-// Increase timeout for large file uploads/downloads (10GB can take a while)
-server.timeout = 0; // Disable timeout or set very high
-server.keepAliveTimeout = 60000;
+// Increase timeout for massive file transfers (50GB support)
+server.timeout = 0;
+server.headersTimeout = 0;
+server.keepAliveTimeout = 120000;
 
 // Initialize WebSocket Servers with noServer: true to handle routing manually
 const wss = new WebSocket.Server({ noServer: true });
@@ -132,8 +133,8 @@ app.post('/api/upload/:sessionId', (req, res) => {
       }
     }),
     limits: {
-      fileSize: 10 * 1024 * 1024 * 1024, // 10GB limit
-      fieldSize: 100 * 1024 * 1024 // 100MB for non-file fields
+      fileSize: 50 * 1024 * 1024 * 1024, // 50GB limit
+      fieldSize: 500 * 1024 * 1024 // 500MB for non-file fields
     }
   }).array('files');
 
@@ -267,12 +268,12 @@ app.get('/api/download/:sessionId/:fileId', (req, res) => {
   // Track download start
   const clientId = req.query.clientId || 'unknown';
   trackDownloadStart(sessionId, fileId, clientId);
-
+  // Optimize download stream with larger buffer for higher speed
   const stat = fs.statSync(filePath);
   const fileSize = stat.size;
   const range = req.headers.range;
 
-  console.log(`Starting download: File ID ${fileId} (${fileSize} bytes) for client ID ${clientId}`);
+  console.log(`Starting High-Speed Transfer: File ID ${fileId} (${fileSize} bytes)`);
 
   // Handle cleanup on response finish
   const cleanup = () => {
@@ -294,7 +295,7 @@ app.get('/api/download/:sessionId/:fileId', (req, res) => {
     const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
     const chunksize = (end - start) + 1;
 
-    const fileStream = fs.createReadStream(filePath, { start, end });
+    const fileStream = fs.createReadStream(filePath, { start, end, highWaterMark: 1024 * 1024 }); // 1MB buffer
 
     res.writeHead(206, {
       'Content-Range': `bytes ${start}-${end}/${fileSize}`,
@@ -304,11 +305,12 @@ app.get('/api/download/:sessionId/:fileId', (req, res) => {
       'Content-Disposition': `attachment; filename="${encodeURIComponent(file.originalName)}"`
     });
 
+    // High-performance piping
     fileStream.pipe(res);
     fileStream.on('error', handleError);
   } else {
     // Full file download
-    const fileStream = fs.createReadStream(filePath);
+    const fileStream = fs.createReadStream(filePath, { highWaterMark: 1024 * 1024 }); // 1MB buffer
 
     res.writeHead(200, {
       'Content-Length': fileSize,
@@ -412,7 +414,7 @@ const whisperUpload = multer({
     },
     filename: (req, file, cb) => cb(null, `${uuidv4()}-${Date.now()}${path.extname(file.originalname)}`)
   }),
-  limits: { fileSize: 100 * 1024 * 1024 } // 100MB per whisper file
+  limits: { fileSize: 5 * 1024 * 1024 * 1024 } // 5GB limit for whispers
 }).single('file');
 
 app.post('/api/whisper/upload', (req, res) => {
@@ -610,6 +612,18 @@ whisperWss.on('connection', (ws, req) => {
           }
           break;
         }
+        case 'typing': {
+          const { to, isTyping } = message;
+          const targetUser = whisperUsers.get(to);
+          if (targetUser && targetUser.ws.readyState === WebSocket.OPEN) {
+            targetUser.ws.send(JSON.stringify({
+              type: 'typing',
+              from: clientId,
+              isTyping
+            }));
+          }
+          break;
+        }
 
       } // end switch
     } catch (err) {
@@ -745,7 +759,25 @@ function trackDownloadFailure(sessionId, fileId, error) {
 }
 
 // Serve static files from the React app
-const frontendPath = path.join(__dirname, '../frontend/dist');
+// Improved path detection for Render/Docker vs Local
+let frontendPath = path.join(__dirname, '../frontend/dist');
+
+// Fallback for some hosting environments like Render where paths might be different
+if (!fs.existsSync(frontendPath)) {
+  const possiblePaths = [
+    path.join(process.cwd(), 'frontend/dist'),
+    path.join(__dirname, '../../frontend/dist'),
+    '/opt/render/project/src/frontend/dist' // Render specific
+  ];
+
+  for (const p of possiblePaths) {
+    if (fs.existsSync(p)) {
+      frontendPath = p;
+      break;
+    }
+  }
+}
+
 if (fs.existsSync(frontendPath)) {
   console.log(`Serving frontend from: ${frontendPath}`);
   app.use(express.static(frontendPath, {
