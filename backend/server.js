@@ -866,6 +866,41 @@ whisperWss.on('connection', (ws, req) => {
           }
           break;
         }
+        case 'typing': {
+          const { to, isGroup, isTyping } = message;
+          if (isGroup) {
+            const group = whisperGroups.get(to);
+            if (group && group.members.includes(clientId)) {
+              group.members.forEach(mid => {
+                if (mid !== clientId) {
+                  const user = whisperUsers.get(mid);
+                  if (user && user.ws.readyState === WebSocket.OPEN) {
+                    user.ws.send(JSON.stringify({
+                      type: 'typing',
+                      from: clientId,
+                      fromName: whisperUsers.get(clientId)?.name,
+                      to,
+                      isGroup: true,
+                      isTyping
+                    }));
+                  }
+                }
+              });
+            }
+          } else {
+            const targetUser = whisperUsers.get(to);
+            if (targetUser && targetUser.ws.readyState === WebSocket.OPEN) {
+              targetUser.ws.send(JSON.stringify({
+                type: 'typing',
+                from: clientId,
+                fromName: whisperUsers.get(clientId)?.name,
+                isGroup: false,
+                isTyping
+              }));
+            }
+          }
+          break;
+        }
 
       } // end switch
     } catch (err) {
