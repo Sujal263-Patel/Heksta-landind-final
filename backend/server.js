@@ -92,6 +92,11 @@ const generateSessionId = () => {
   return uuidv4().substring(0, 8);
 };
 
+// Health check for offline/online detection
+app.get('/api/ping', (req, res) => {
+  res.json({ status: 'ok', timestamp: Date.now() });
+});
+
 // Create file session
 app.post('/api/create-session', (req, res) => {
   try {
