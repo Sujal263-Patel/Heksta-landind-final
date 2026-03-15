@@ -14,9 +14,34 @@ const app = express();
 const server = http.createServer(app);
 
 // Increase timeout for massive file transfers (50GB support)
-server.timeout = 0;
+server.timeout = 0; // Disable timeout for long uploads
 server.headersTimeout = 0;
-server.keepAliveTimeout = 120000;
+server.keepAliveTimeout = 600000; // 10 minutes keep-alive
+server.requestTimeout = 0; // Modern node support
+
+// Configure Multer once at top level to optimize memory and handle potential massive uploads
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const sid = req.params.sessionId;
+    const dir = path.join(__dirname, 'uploads', sid);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    cb(null, dir);
+  },
+  filename: (req, file, cb) => {
+    // Obfuscate filenames on disk for user privacy
+    cb(null, `${Date.now()}-${uuidv4()}${path.extname(file.originalname)}`);
+  }
+});
+
+const uploadMiddleware = multer({
+  storage: storage,
+  limits: {
+    fileSize: 50 * 1024 * 1024 * 1024, // 50GB limit
+    fieldSize: 500 * 1024 * 1024 // 500MB field size
+  }
+}).array('files');
 
 // Initialize WebSocket Servers with noServer: true to handle routing manually
 const wss = new WebSocket.Server({ noServer: true });
@@ -118,29 +143,7 @@ app.post('/api/upload/:sessionId', (req, res) => {
     return res.status(400).json({ error: 'Session is not active' });
   }
 
-  // Handle file upload
-  const upload = multer({
-    storage: multer.diskStorage({
-      destination: (req, file, cb) => {
-        const sid = req.params.sessionId;
-        const dir = path.join(__dirname, 'uploads', sid);
-        if (!fs.existsSync(dir)) {
-          fs.mkdirSync(dir, { recursive: true });
-        }
-        cb(null, dir);
-      },
-      filename: (req, file, cb) => {
-        // Obfuscate filenames on disk for user privacy
-        cb(null, `${Date.now()}-${uuidv4()}${path.extname(file.originalname)}`);
-      }
-    }),
-    limits: {
-      fileSize: 50 * 1024 * 1024 * 1024, // 50GB limit
-      fieldSize: 500 * 1024 * 1024 // 500MB for non-file fields
-    }
-  }).array('files');
-
-  upload(req, res, (err) => {
+  uploadMiddleware(req, res, (err) => {
     if (err) {
       console.error('Upload error:', err);
       return res.status(500).json({ error: 'Upload failed: ' + err.message });
