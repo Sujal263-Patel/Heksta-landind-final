@@ -85,17 +85,19 @@ app.post('/api/create-session', (req, res) => {
 
     sessions.set(sessionId, session);
 
-    // Frontend URL for joining
-    const frontendBaseUrl = process.env.CLIENT_URL || 'http://localhost:5173';
-    const joinLink = `${frontendBaseUrl}/join/${sessionId}`;
+    // Generate both Local and Global links
+    const localIp = getLocalIP();
+    const isProd = process.env.NODE_ENV === 'production';
 
-    console.log(`Created secure session ID: ${sessionId}`);
-    console.log(`Session join link generated [HIDDEN FOR PRIVACY]`);
+    const globalBase = isProd ? 'https://heksta-landind-final.onrender.com' : `http://${localIp}:${PORT}`;
+    const localBase = `http://${localIp}:${PORT}`;
 
     res.json({
       sessionId,
-      joinLink,
-      serverUrl: getServerUrl()
+      joinLink: `${globalBase}/join/${sessionId}`,
+      localJoinLink: `${localBase}/join/${sessionId}`,
+      serverUrl: globalBase,
+      localServerUrl: localBase
     });
   } catch (error) {
     console.error('Session creation error:', error);
