@@ -55,7 +55,17 @@ let cachedServerUrl = null;
 const getServerUrl = () => {
   if (cachedServerUrl) return cachedServerUrl;
 
-  if (process.env.NODE_ENV === 'production') {
+  const domain = process.env.DOMAIN || process.env.PUBLIC_URL;
+
+  // Force LAN Mode if explicitly requested or running in Electron without a domain
+  if (process.env.LAN_MODE === 'true' || (process.env.IS_ELECTRON === 'true' && !domain)) {
+    cachedServerUrl = `http://${getLocalIP()}:${PORT}`;
+    return cachedServerUrl;
+  }
+
+  if (domain) {
+    cachedServerUrl = domain.startsWith('http') ? domain : `https://${domain}`;
+  } else if (process.env.NODE_ENV === 'production' && !process.env.IS_ELECTRON) {
     cachedServerUrl = 'https://heksta.in';
   } else {
     cachedServerUrl = `http://${getLocalIP()}:${PORT}`;
@@ -117,9 +127,7 @@ app.post('/api/create-session', (req, res) => {
 
     // Generate both Local and Global links
     const localIp = getLocalIP();
-    const isProd = process.env.NODE_ENV === 'production';
-
-    const globalBase = isProd ? 'https://heksta.in' : `http://${localIp}:${PORT}`;
+    const globalBase = getServerUrl();
     const localBase = `http://${localIp}:${PORT}`;
 
     res.json({
