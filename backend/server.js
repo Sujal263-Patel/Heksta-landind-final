@@ -103,6 +103,7 @@ app.post('/api/create-session', (req, res) => {
       password,
       senderName,
       files: [],
+      socketFiles: [], // Track files shared via WebSockets
       createdAt: Date.now(),
       active: true,
       connectedClients: 0
@@ -170,14 +171,19 @@ app.post('/api/upload/:sessionId', (req, res) => {
     console.log(`Uploaded ${files.length} files to session ${sessionId}`);
 
     // Notify connected clients
-    broadcastToSession(sessionId, {
-      type: 'files_updated',
-      files: session.files.map(f => ({
+    const filesList = [
+      ...(session.files.map(f => ({
         id: f.id,
         name: f.originalName,
         size: f.size,
         type: f.mimetype
-      }))
+      }))),
+      ...(session.socketFiles || [])
+    ];
+
+    broadcastToSession(sessionId, {
+      type: 'files_updated',
+      files: filesList
     });
 
     res.json({
@@ -235,13 +241,18 @@ app.get('/api/session/:sessionId/files', (req, res) => {
     return res.status(404).json({ error: 'Session not found' });
   }
 
-  res.json({
-    files: session.files.map(file => ({
+  const filesList = [
+    ...(session.files.map(file => ({
       id: file.id,
       name: file.originalName,
       size: file.size,
       type: file.mimetype
-    }))
+    }))),
+    ...(session.socketFiles || [])
+  ];
+
+  res.json({
+    files: filesList
   });
 });
 
@@ -523,9 +534,44 @@ wss.on('connection', (ws, req) => {
       const message = JSON.parse(data);
 
       switch (message.type) {
+        case 'announce_file': {
+          const { fileId, fileName, fileSize, fileType } = message;
+          const session = sessions.get(sessionId);
+          if (session) {
+            if (!session.socketFiles) session.socketFiles = [];
+
+            // Add to session socket files if not already there
+            if (!session.socketFiles.find(f => f.id === fileId)) {
+              session.socketFiles.push({
+                id: fileId,
+                name: fileName,
+                size: fileSize,
+                type: fileType,
+                isSocketFile: true,
+                announcedAt: Date.now()
+              });
+
+              // Notify others that a new file is being shared via socket
+              broadcastToSession(sessionId, {
+                type: 'file_announced',
+                file: {
+                  id: fileId,
+                  name: fileName,
+                  size: fileSize,
+                  type: fileType,
+                  isSocketFile: true
+                }
+              }, clientId);
+            }
+          }
+          break;
+        }
         case 'broadcast_file_chunk': {
-          const { chunk, fileId, isLast, fileName, fileType, fileSize } = message;
+          const { chunk, fileId, isLast, fileName, fileType, fileSize, chunkIndex, totalChunks } = message;
           // Relay to ALL OTHER clients in the session
+          // We can relay binary data if chunk is an ArrayBuffer/Blob, 
+          // but for JSON compatibility we might stick to base64 or send raw if it's a binary message.
+          // For now, let's just relay whatever we got.
           broadcastToSession(sessionId, {
             type: 'broadcast_file_chunk',
             from: clientId,
@@ -535,6 +581,8 @@ wss.on('connection', (ws, req) => {
             fileName,
             fileType,
             fileSize,
+            chunkIndex,
+            totalChunks,
             timestamp: Date.now()
           }, clientId); // Exclude sender
           break;
