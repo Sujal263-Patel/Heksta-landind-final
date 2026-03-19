@@ -76,7 +76,7 @@ app.use(express.json());
 
 // CORS Configuration
 app.use(cors({
-  origin: CLIENT_URL || '*',
+  origin: [CLIENT_URL, 'https://heksta.in', 'https://heksta-landind-final.onrender.com'].filter(Boolean),
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Origin', 'X-Requested-With', 'Content-Type', 'Accept']
