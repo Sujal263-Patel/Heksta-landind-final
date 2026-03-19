@@ -518,6 +518,34 @@ wss.on('connection', (ws, req) => {
     connectedClients: session.connectedClients
   });
 
+  ws.on('message', (data) => {
+    try {
+      const message = JSON.parse(data);
+
+      switch (message.type) {
+        case 'broadcast_file_chunk': {
+          const { chunk, fileId, isLast, fileName, fileType, fileSize } = message;
+          // Relay to ALL OTHER clients in the session
+          broadcastToSession(sessionId, {
+            type: 'broadcast_file_chunk',
+            from: clientId,
+            chunk,
+            fileId,
+            isLast,
+            fileName,
+            fileType,
+            fileSize,
+            timestamp: Date.now()
+          }, clientId); // Exclude sender
+          break;
+        }
+        // ... existing main wss logic could follow if any
+      }
+    } catch (e) {
+      // Not JSON or other error
+    }
+  });
+
   ws.on('close', () => {
     const session = sessions.get(sessionId);
     if (session) {
@@ -595,6 +623,26 @@ whisperWss.on('connection', (ws, req) => {
               from: clientId,
               fromName: whisperUsers.get(clientId)?.name || 'Unknown',
               content,
+              timestamp: Date.now()
+            }));
+          }
+          break;
+        }
+
+        case 'private_file_chunk': {
+          const { to, chunk, fileId, isLast, fileName, fileType, fileSize } = message;
+          const targetUser = whisperUsers.get(to);
+          if (targetUser && targetUser.ws.readyState === WebSocket.OPEN) {
+            targetUser.ws.send(JSON.stringify({
+              type: 'private_file_chunk',
+              from: clientId,
+              fromName: whisperUsers.get(clientId)?.name || 'Unknown',
+              chunk,
+              fileId,
+              isLast,
+              fileName,
+              fileType,
+              fileSize,
               timestamp: Date.now()
             }));
           }
