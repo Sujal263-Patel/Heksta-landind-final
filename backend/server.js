@@ -799,6 +799,11 @@ if (fs.existsSync(frontendPath)) {
     }
   }));
 
+  // Specific 404 handler for API routes to prevent returning index.html
+  app.all('/api/*', (req, res) => {
+    res.status(404).json({ error: 'API route not found' });
+  });
+
   // Handle SPA routing - serve index.html for all non-API routes
   app.get('*', (req, res, next) => {
     // Skip if it is an API request or static asset that was missed
@@ -822,6 +827,14 @@ if (fs.existsSync(frontendPath)) {
   });
 }
 
+
+// Global error handler for API routes
+app.use('/api', (err, req, res, next) => {
+  console.error('API Error:', err);
+  if (!res.headersSent) {
+    res.status(500).json({ error: 'Internal server error: ' + err.message });
+  }
+});
 
 // Start server
 server.listen(PORT, () => {
