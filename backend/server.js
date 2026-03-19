@@ -55,17 +55,7 @@ let cachedServerUrl = null;
 const getServerUrl = () => {
   if (cachedServerUrl) return cachedServerUrl;
 
-  const domain = process.env.DOMAIN || process.env.PUBLIC_URL;
-
-  // Force LAN Mode if explicitly requested or running in Electron without a domain
-  if (process.env.LAN_MODE === 'true' || (process.env.IS_ELECTRON === 'true' && !domain)) {
-    cachedServerUrl = `http://${getLocalIP()}:${PORT}`;
-    return cachedServerUrl;
-  }
-
-  if (domain) {
-    cachedServerUrl = domain.startsWith('http') ? domain : `https://${domain}`;
-  } else if (process.env.NODE_ENV === 'production' && !process.env.IS_ELECTRON) {
+  if (process.env.NODE_ENV === 'production') {
     cachedServerUrl = 'https://heksta.in';
   } else {
     cachedServerUrl = `http://${getLocalIP()}:${PORT}`;
@@ -102,11 +92,6 @@ const generateSessionId = () => {
   return uuidv4().substring(0, 8);
 };
 
-// Health check for offline/online detection
-app.get('/api/ping', (req, res) => {
-  res.json({ status: 'ok', timestamp: Date.now() });
-});
-
 // Create file session
 app.post('/api/create-session', (req, res) => {
   try {
@@ -127,7 +112,9 @@ app.post('/api/create-session', (req, res) => {
 
     // Generate both Local and Global links
     const localIp = getLocalIP();
-    const globalBase = getServerUrl();
+    const isProd = process.env.NODE_ENV === 'production';
+
+    const globalBase = isProd ? 'https://heksta.in' : `http://${localIp}:${PORT}`;
     const localBase = `http://${localIp}:${PORT}`;
 
     res.json({
@@ -529,27 +516,6 @@ wss.on('connection', (ws, req) => {
     type: 'client_connected',
     clientId,
     connectedClients: session.connectedClients
-  });
-
-  ws.on('message', (data) => {
-    try {
-      const message = JSON.parse(data);
-      if (message.type === 'signal') {
-        // Relay signaling data to a specific client or the sender
-        const { to, signalData, fromClientId } = message;
-        wss.clients.forEach(client => {
-          if (client.clientId === to && client.readyState === WebSocket.OPEN) {
-            client.send(JSON.stringify({
-              type: 'signal',
-              from: fromClientId || clientId,
-              signalData
-            }));
-          }
-        });
-      }
-    } catch (e) {
-      console.error('WS Message error:', e);
-    }
   });
 
   ws.on('close', () => {
