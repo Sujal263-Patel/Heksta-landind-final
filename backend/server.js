@@ -66,7 +66,10 @@ const getServerUrl = () => {
   if (domain) {
     cachedServerUrl = domain.startsWith('http') ? domain : `https://${domain}`;
   } else if (process.env.NODE_ENV === 'production' && !process.env.IS_ELECTRON) {
-    cachedServerUrl = 'https://heksta.in';
+    // If we're on Render or another cloud host, the HOST header might be useful, 
+    // but the best way is to let the frontend determine it or get it from the request headers
+    // For now, let's just use a relative or placeholder that we'll fix in the route
+    return null;
   } else {
     cachedServerUrl = `http://${getLocalIP()}:${PORT}`;
   }
@@ -127,15 +130,18 @@ app.post('/api/create-session', (req, res) => {
 
     // Generate both Local and Global links
     const localIp = getLocalIP();
-    const globalBase = getServerUrl();
+    const origin = req.get('origin') || req.get('host') || getServerUrl() || '';
+    const globalBase = origin.startsWith('http') ? origin : `${req.protocol}://${origin}`;
     const localBase = `http://${localIp}:${PORT}`;
 
     res.json({
       sessionId,
-      joinLink: `${globalBase}/join/${sessionId}`,
+      joinLink: `${globalBase.replace(/\/$/, '')}/join/${sessionId}`,
       localJoinLink: `${localBase}/join/${sessionId}`,
       serverUrl: globalBase,
-      localServerUrl: localBase
+      localServerUrl: localBase,
+      totalJoins: 0,
+      connectedClients: 0
     });
   } catch (error) {
     console.error('Session creation error:', error);
@@ -213,11 +219,26 @@ app.get('/api/session/:sessionId', (req, res) => {
     return res.status(404).json({ error: 'Session not found' });
   }
 
+  // Increment total joins (view count)
+  session.totalJoins = (session.totalJoins || 0) + 1;
+  sessions.set(sessionId, session);
+
+  // Notify sender of new visitor
+  broadcastToSession(sessionId, {
+    type: 'stats_update',
+    stats: {
+      connectedClients: session.connectedClients,
+      totalJoins: session.totalJoins,
+      fileCount: session.files.length
+    }
+  });
+
   res.json({
     sessionId: session.id,
     senderName: session.senderName,
     fileCount: session.files.length,
     connectedClients: session.connectedClients,
+    totalJoins: session.totalJoins,
     requiresPassword: !!session.password
   });
 });
@@ -420,6 +441,68 @@ app.post('/api/session/:sessionId/close', (req, res) => {
   });
 
   res.json({ message: 'Session closed successfully' });
+});
+
+// Feedback & Bug Reporting System
+const FEEDBACK_PATH = path.join(__dirname, 'reports.json');
+
+app.post('/api/feedback', (req, res) => {
+  const { email, like, dislike, type = 'feedback' } = req.body;
+  const report = {
+    id: uuidv4(),
+    type,
+    email,
+    like,
+    dislike,
+    timestamp: new Date().toISOString(),
+    userAgent: req.headers['user-agent']
+  };
+
+  console.log(`[REPORT][${type.toUpperCase()}] From ${email}:`, report);
+
+  // Save to file
+  try {
+    let reports = [];
+    if (fs.existsSync(FEEDBACK_PATH)) {
+      reports = JSON.parse(fs.readFileSync(FEEDBACK_PATH, 'utf8'));
+    }
+    reports.push(report);
+    fs.writeFileSync(FEEDBACK_PATH, JSON.stringify(reports, null, 2));
+  } catch (e) {
+    console.error('Failed to save report:', e);
+  }
+
+  res.json({ success: true, message: 'Thank you for your time!' });
+});
+
+app.post('/api/bug-report', (req, res) => {
+  const { email, description } = req.body;
+  const report = {
+    id: uuidv4(),
+    type: 'bug',
+    email,
+    description,
+    timestamp: new Date().toISOString(),
+    userAgent: req.headers['user-agent']
+  };
+
+  console.log('[REPORT][BUG] From ' + email + ':', report);
+
+  try {
+    let reports = [];
+    if (fs.existsSync(FEEDBACK_PATH)) {
+      reports = JSON.parse(fs.readFileSync(FEEDBACK_PATH, 'utf8'));
+    }
+    reports.push(report);
+    fs.writeFileSync(FEEDBACK_PATH, JSON.stringify(reports, null, 2));
+  } catch (e) {
+    console.error('Failed to save bug report:', e);
+  }
+
+  res.json({
+    success: true,
+    message: "We've received your report! Thank you for helping us build Heksta. Your contribution is what keeps us going! ❤️"
+  });
 });
 
 // ── WHISPER MODE FILE UPLOAD ──
@@ -772,7 +855,12 @@ function trackDownloadComplete(sessionId, fileId) {
     broadcastToSession(sessionId, {
       type: 'download_stats',
       fileId,
-      stats
+      stats,
+      sessionStats: {
+        totalDownloads: Array.from(downloadStats.values())
+          .filter(s => s.sessionId === sessionId)
+          .reduce((sum, s) => sum + s.completed, 0)
+      }
     });
   }
 }
