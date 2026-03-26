@@ -39,7 +39,7 @@ const uploadMiddleware = multer({
   storage: storage,
   limits: {
     fileSize: 50 * 1024 * 1024 * 1024, // 50GB limit
-    fieldSize: 500 * 1024 * 1024 // 500MB field size
+    fieldSize: 1024 * 1024 * 1024 // 1GB field size
   }
 }).array('files');
 
@@ -518,7 +518,16 @@ wss.on('connection', (ws, req) => {
       sessionId: session.id,
       senderName: session.senderName,
       fileCount: session.files.length,
-      connectedClients: session.connectedClients
+      connectedClients: session.connectedClients,
+      files: [
+        ...(session.files.map(f => ({
+          id: f.id,
+          name: f.originalName,
+          size: f.size,
+          type: f.mimetype
+        }))),
+        ...(session.socketFiles || [])
+      ]
     }
   }));
 
